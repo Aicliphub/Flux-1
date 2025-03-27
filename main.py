@@ -28,14 +28,29 @@ R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME")
 R2_PUBLIC_DOMAIN = os.getenv("R2_PUBLIC_DOMAIN")
 FLUX_API_KEY = os.getenv("FLUX_API_KEY")
 
-# Initialize S3 client
-s3_client = boto3.client(
-    's3',
-    endpoint_url=R2_ENDPOINT_URL,
-    aws_access_key_id=R2_ACCESS_KEY_ID,
-    aws_secret_access_key=R2_SECRET_ACCESS_KEY,
-    config=Config(signature_version='s3v4')
-)
+def get_s3_client():
+    """Initialize S3 client with runtime environment validation"""
+    required_vars = [
+        R2_ACCESS_KEY_ID, 
+        R2_SECRET_ACCESS_KEY,
+        R2_ENDPOINT_URL,
+        R2_BUCKET_NAME,
+        R2_PUBLIC_DOMAIN
+    ]
+    
+    if any(var is None for var in required_vars):
+        raise HTTPException(
+            status_code=500,
+            detail="Missing Cloudflare R2 configuration in environment variables"
+        )
+    
+    return boto3.client(
+        's3',
+        endpoint_url=R2_ENDPOINT_URL,
+        aws_access_key_id=R2_ACCESS_KEY_ID,
+        aws_secret_access_key=R2_SECRET_ACCESS_KEY,
+        config=Config(signature_version='s3v4')
+    )
 
 class ImageRequest(BaseModel):
     prompt: str
@@ -81,7 +96,8 @@ async def generate_image(request: ImageRequest):
         timestamp = int(time.time())
         object_name = f"generated_image_{timestamp}.png"
         
-        s3_client.put_object(
+        client = get_s3_client()
+        client.put_object(
             Bucket=R2_BUCKET_NAME,
             Key=object_name,
             Body=image_bytes,
