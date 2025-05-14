@@ -7,64 +7,58 @@ import requests
 from botocore.client import Config
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
 
 app = FastAPI()
 
-# CORS Configuration — Allow all origins but not credentials
+# CORS settings
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Change to your frontend domain in production
-    allow_credentials=False,
+    allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Define Pydantic model for payload validation
-class PromptPayload(BaseModel):
-    prompt: str
-
-# Initialize R2 client on startup
+# Initialize R2 client
 @app.on_event("startup")
 async def startup_event():
     global s3_client
-    try:
-        s3_client = boto3.client(
-            's3',
-            endpoint_url=os.environ['R2_ENDPOINT_URL'],
-            aws_access_key_id=os.environ['R2_ACCESS_KEY_ID'],
-            aws_secret_access_key=os.environ['R2_SECRET_ACCESS_KEY'],
-            config=Config(signature_version='s3v4')
-        )
-        print("✅ R2 client initialized.")
-    except Exception as e:
-        print(f"❌ Failed to initialize S3 client: {e}")
-        raise
+    s3_client = boto3.client(
+        's3',
+        endpoint_url=os.environ['R2_ENDPOINT_URL'],
+        aws_access_key_id=os.environ['R2_ACCESS_KEY_ID'],
+        aws_secret_access_key=os.environ['R2_SECRET_ACCESS_KEY'],
+        config=Config(signature_version='s3v4')
+    )
+    print("✅ R2 client initialized.")
 
-# Generate image via Flux API
-def generate_image(prompt: str) -> str:
+def generate_image(prompt: str):
     headers = {
         'accept': 'application/json',
+        'content-type': 'application/json',
         'authorization': f'Bearer {os.environ["FLUX_API_KEY"]}',
     }
 
-    files = {
-        'prompt': (None, prompt),
-        'model': (None, 'flux_1_schnell'),
-        'size': (None, '16_9'),
-        'lora': (None, ''),
-        'style': (None, 'no_style'),
+    payload = {
+        'prompt': prompt,
+        'model': 'flux_1_schnell',
+        'size': '16_9',  # or '9_16'
+        'lora': None,
+        'style': None,
+        'color': None,
+        'lighting': None,
+        'composition': None,
+        'privacy': 'private',
     }
 
     response = requests.post(
         'https://api.freeflux.ai/v1/images/generate',
         headers=headers,
-        files=files
+        json=payload
     )
 
-    print("Flux API response status:", response.status_code)
-
     if response.status_code != 200:
+        print("Flux API response status:", response.status_code)
         print("Flux error response:", response.text)
         raise HTTPException(
             status_code=response.status_code,
@@ -78,18 +72,16 @@ def generate_image(prompt: str) -> str:
         if not image_data_url or not image_data_url.startswith("data:image/png;base64,"):
             raise HTTPException(
                 status_code=500,
-                detail="Invalid image data format from Flux"
+                detail="Invalid image data response"
             )
 
         return image_data_url.split(",")[1]
-
     except json.JSONDecodeError:
         raise HTTPException(
             status_code=500,
-            detail="Invalid JSON response from Flux"
+            detail="Invalid API response format"
         )
 
-# Upload image to R2
 def upload_to_r2(image_data: str) -> str:
     try:
         image_bytes = base64.b64decode(image_data)
@@ -104,29 +96,31 @@ def upload_to_r2(image_data: str) -> str:
         )
 
         return f"https://{os.environ['R2_PUBLIC_DOMAIN']}/{object_name}"
-
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=f"R2 upload failed: {str(e)}"
         )
 
-# API Endpoint
 @app.post("/generate")
-async def generate_endpoint(payload: PromptPayload):
+async def generate_endpoint(payload: dict):
     try:
-        print("🎯 Received prompt:", payload.prompt)
+        prompt = payload.get("prompt")
+        if not prompt:
+            raise HTTPException(
+                status_code=400,
+                detail="Prompt is required"
+            )
 
-        base64_image = generate_image(payload.prompt)
+        print(f"🎯 Received prompt: {prompt}")
+        base64_image = generate_image(prompt)
         image_url = upload_to_r2(base64_image)
 
-        print("✅ Image uploaded to:", image_url)
         return {"image_url": image_url}
 
     except HTTPException as he:
         raise he
     except Exception as e:
-        print("❌ Unexpected error:", e)
         raise HTTPException(
             status_code=500,
             detail=f"Internal server error: {str(e)}"
